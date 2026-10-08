@@ -38,7 +38,7 @@ Two dividers can be moved: the edge of the collection browser, and the border be
 **With the mouse**, drag either border. The border highlights when the pointer is over it.
 Dragging needs visible borders, so it is not available with compact spacing.
 
-**With the keyboard**, press <kbd>ctrl</kbd>+<kbd>r</kbd> to enter resize mode. The selected divider is highlighted and the footer lists the keys:
+**With the keyboard**, press <kbd>ctrl</kbd>+<kbd>r</kbd> to enter resize mode. It starts on the panel that has focus: the collection browser moves its edge, the request editor or the response area moves the split between them. The panel is highlighted and the footer lists the keys:
 
 - <kbd>h</kbd>/<kbd>l</kbd> (or <kbd>k</kbd>/<kbd>j</kbd>, or the arrow keys) move it by two cells or two percent, <kbd>H</kbd>/<kbd>L</kbd> move it five times as far.
 - <kbd>tab</kbd> switches between the collection browser edge and the request/response split.

@@ -174,3 +174,26 @@ def test_focusing_a_widget_ends_resize_mode() -> None:
         assert screen.focused is screen.url_input
 
     run(check)
+
+
+def test_resize_mode_starts_on_the_focused_panel() -> None:
+    async def check(screen, pilot):
+        request, response = screen.request_editor, screen.response_area
+        screen.request_body_text_area.focus()
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert screen.resize_target == "split"
+        assert request.has_class("-resize-target")
+        assert not response.has_class("-resize-target")
+        assert not screen.collection_browser.has_class("-resize-target")
+        await pilot.press("j", "escape")
+        await pilot.pause()
+        assert screen.split_percent == 52
+
+        screen.collection_tree.focus()
+        await pilot.press("ctrl+r")
+        await pilot.pause()
+        assert screen.resize_target == "sidebar"
+        assert screen.collection_browser.has_class("-resize-target")
+
+    run(check)

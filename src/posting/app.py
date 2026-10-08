@@ -312,6 +312,7 @@ class MainScreen(Screen[None]):
         self.current_layout = self._initial_layout
         self._dragging: ResizeTarget | None = None
         self._focus_before_resize: Widget | None = None
+        self._split_side: Literal["request", "response"] = "request"
         if self.settings.collection_browser.width != 32:
             self.sidebar_width = self.settings.collection_browser.width
 
@@ -938,10 +939,19 @@ class MainScreen(Screen[None]):
             targets.append("split")
         return targets
 
-    def _highlight_resize_target(self, target: ResizeTarget | None) -> None:
+    def _highlight_resize_target(
+        self,
+        target: ResizeTarget | None,
+        side: Literal["request", "response"] | None = None,
+    ) -> None:
+        """Highlight the sections a divider belongs to; for the split, `side`
+        narrows it to the section resize mode was started from."""
+        split = target == "split"
         self.collection_browser.set_class(target == "sidebar", "-resize-target")
-        self.request_editor.set_class(target == "split", "-resize-target")
-        self.response_area.set_class(target == "split", "-resize-target")
+        self.request_editor.set_class(
+            split and side != "response", "-resize-target"
+        )
+        self.response_area.set_class(split and side != "request", "-resize-target")
 
     def _apply_split(self) -> None:
         request, response = self.request_editor, self.response_area
@@ -973,7 +983,9 @@ class MainScreen(Screen[None]):
         self._apply_split()
 
     def watch_resize_mode(self, active: bool) -> None:
-        self._highlight_resize_target(self.resize_target if active else None)
+        self._highlight_resize_target(
+            self.resize_target if active else None, self._split_side
+        )
         # A focused input would consume h/j/k/l as text, so focus is parked
         # while resize mode is active and given back afterwards.
         if active:
@@ -986,7 +998,7 @@ class MainScreen(Screen[None]):
 
     def watch_resize_target(self, target: ResizeTarget) -> None:
         if self.resize_mode:
-            self._highlight_resize_target(target)
+            self._highlight_resize_target(target, self._split_side)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {
@@ -1005,7 +1017,20 @@ class MainScreen(Screen[None]):
         if not targets:
             self.notify("Nothing to resize.", severity="warning", timeout=2)
             return
-        if self.resize_target not in targets:
+        # Resize the panel that has focus: the collection browser's edge, or the
+        # request/response split from whichever of the two is focused.
+        focused_target: ResizeTarget | None = None
+        if self.focus_within_request():
+            focused_target, self._split_side = "split", "request"
+        elif self.focus_within_response():
+            focused_target, self._split_side = "split", "response"
+        elif self.focused is not None and (
+            self.collection_browser in self.focused.ancestors_with_self
+        ):
+            focused_target = "sidebar"
+        if focused_target in targets:
+            self.resize_target = focused_target
+        elif self.resize_target not in targets:
             self.resize_target = targets[0]
         self.resize_mode = True
 
@@ -1129,7 +1154,9 @@ class MainScreen(Screen[None]):
         event.stop()
         self._dragging = None
         self.release_mouse()
-        self._highlight_resize_target(self.resize_target if self.resize_mode else None)
+        self._highlight_resize_target(
+            self.resize_target if self.resize_mode else None, self._split_side
+        )
 
     @on(RequestBodyTextArea.Changed, selector="RequestBodyTextArea")
     def on_request_body_change(self, event: RequestBodyTextArea.Changed) -> None:
