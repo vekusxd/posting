@@ -1,5 +1,10 @@
 ## Unreleased
 
+### Added
+
+- Resize the collection browser and the request/response split by dragging their borders, or with resize mode (`ctrl+r`, then `h`/`j`/`k`/`l`).
+- New `collection_browser.width` config for the starting width of the collection browser.
+
 ## 2.11.2 [5th October 2026]
 
 ### Fixed

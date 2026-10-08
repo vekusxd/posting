@@ -20,7 +20,7 @@ from textual.command import (
     SimpleProvider,
 )
 from textual.css.query import NoMatches
-from textual.events import Click
+from textual.events import Click, MouseDown, MouseMove, MouseUp
 from textual.reactive import Reactive, reactive
 from textual.app import App, ComposeResult, InvalidThemeError
 from textual.binding import Binding
@@ -46,6 +46,16 @@ from posting.collection import (
 from posting.commands import PostingProvider, RequestSearchProvider
 from posting.config import SETTINGS, Settings
 from posting.history import HistoryStore
+from posting.resizing import (
+    SPLIT_DEFAULT,
+    ResizeTarget,
+    clamp_sidebar_width,
+    clamp_split,
+    on_sidebar_edge,
+    on_split_edge,
+    sidebar_width_at,
+    split_at,
+)
 from posting.jump_overlay import JumpOverlay
 from posting.jumper import Jumper
 from posting.scripts import execute_script, uncache_module, Posting as PostingContext
@@ -119,6 +129,11 @@ class AppBody(Vertical):
     """The body of the app."""
 
 
+def _has_visible_border(widget: Widget) -> bool:
+    """Whether the widget draws a border; compact spacing removes section borders."""
+    return widget.styles.border_top[0] not in ("", "none", "hidden")
+
+
 class MainScreen(Screen[None]):
     AUTO_FOCUS = None
     BINDING_GROUP_TITLE = "Main Screen"
@@ -190,6 +205,72 @@ class MainScreen(Screen[None]):
             tooltip="Search for a request by name.",
             id="search-requests",
         ),
+        Binding(
+            "ctrl+r",
+            "toggle_resize_mode",
+            "Resize",
+            show=False,
+            tooltip="Enter resize mode to move the edges of the collection browser and the request/response split with h/j/k/l.",
+            id="resize-mode",
+        ),
+        # Resize mode keys. Resize mode clears focus, so these screen bindings get
+        # the keys first; outside resize mode check_action disables them and the
+        # keys keep their usual meaning.
+        Binding(
+            "h,left,k,up",
+            "resize_step(-1)",
+            "Move",
+            key_display="h/k",
+            tooltip="Move the selected divider left (or up).",
+            id="resize-mode.back",
+        ),
+        Binding(
+            "l,right,j,down",
+            "resize_step(1)",
+            "Move",
+            key_display="l/j",
+            tooltip="Move the selected divider right (or down).",
+            id="resize-mode.forward",
+        ),
+        Binding(
+            "H,K",
+            "resize_step(-5)",
+            "Move more",
+            show=False,
+            id="resize-mode.back-more",
+        ),
+        Binding(
+            "L,J",
+            "resize_step(5)",
+            "Move more",
+            show=False,
+            id="resize-mode.forward-more",
+        ),
+        Binding(
+            "tab,shift+tab",
+            "resize_switch_target",
+            "Other divider",
+            tooltip="Switch between the collection browser edge and the request/response split.",
+            id="resize-mode.switch",
+        ),
+        # Declaring tab on this screen hides Screen's focus bindings, so they are
+        # repeated here; they apply whenever the resize binding above is disabled.
+        Binding("tab", "app.focus_next", "Focus Next", show=False),
+        Binding("shift+tab", "app.focus_previous", "Focus Previous", show=False),
+        Binding(
+            "equals_sign",
+            "resize_reset",
+            "Reset",
+            tooltip="Restore the selected divider to its initial position.",
+            id="resize-mode.reset",
+        ),
+        Binding(
+            "escape,enter,ctrl+r",
+            "exit_resize_mode",
+            "Done",
+            tooltip="Leave resize mode.",
+            id="resize-mode.exit",
+        ),
     ]
 
     selected_method: Reactive[HttpRequestMethod] = reactive("GET", init=False)
@@ -202,6 +283,14 @@ class MainScreen(Screen[None]):
     """The currently expanded section of the main screen."""
     _jumping: Reactive[bool] = reactive(False, init=False, bindings=True)
     """True if 'jump mode' is currently active, otherwise False."""
+    resize_mode: Reactive[bool] = reactive(False, init=False, bindings=True)
+    """True while the keyboard moves the panel dividers."""
+    resize_target: Reactive[ResizeTarget] = reactive("sidebar", init=False)
+    """The divider that resize mode moves."""
+    sidebar_width: Reactive[int] = reactive(32, init=False)
+    """The width of the collection browser, in cells."""
+    split_percent: Reactive[int] = reactive(SPLIT_DEFAULT, init=False)
+    """The request editor's share of the request/response split, in percent."""
 
     def __init__(
         self,
@@ -221,6 +310,10 @@ class MainScreen(Screen[None]):
 
     def on_mount(self) -> None:
         self.current_layout = self._initial_layout
+        self._dragging: ResizeTarget | None = None
+        self._focus_before_resize: Widget | None = None
+        if self.settings.collection_browser.width != 32:
+            self.sidebar_width = self.settings.collection_browser.width
 
         # If the header is not visible, the URL Bar is one cell higher.
         is_header_visible = self.settings.heading.visible
@@ -822,6 +915,7 @@ class MainScreen(Screen[None]):
         other_class = classes.difference({layout}).pop()
         self.app_body.add_class(f"layout-{layout}")
         self.app_body.remove_class(f"layout-{other_class}")
+        self._apply_split()
 
     def watch_expanded_section(
         self, section: Literal["request", "response"] | None
@@ -834,6 +928,208 @@ class MainScreen(Screen[None]):
         # and vice-versa.
         request_editor.set_class(section == "response", "hidden")
         response_area.set_class(section == "request", "hidden")
+
+    def _resize_targets(self) -> list[ResizeTarget]:
+        """The dividers that are currently on screen."""
+        targets: list[ResizeTarget] = []
+        if self.collection_browser.display:
+            targets.append("sidebar")
+        if self.expanded_section is None:
+            targets.append("split")
+        return targets
+
+    def _highlight_resize_target(self, target: ResizeTarget | None) -> None:
+        self.collection_browser.set_class(target == "sidebar", "-resize-target")
+        self.request_editor.set_class(target == "split", "-resize-target")
+        self.response_area.set_class(target == "split", "-resize-target")
+
+    def _apply_split(self) -> None:
+        request, response = self.request_editor, self.response_area
+        if self.split_percent == SPLIT_DEFAULT:
+            # An even split is the stylesheet's own layout.
+            request.styles.width = response.styles.width = None
+            request.styles.height = response.styles.height = None
+            return
+        request_share = f"{self.split_percent}fr"
+        response_share = f"{100 - self.split_percent}fr"
+        if self.current_layout == "horizontal":
+            request.styles.width, response.styles.width = request_share, response_share
+            request.styles.height = response.styles.height = None
+        else:
+            request.styles.height, response.styles.height = (
+                request_share,
+                response_share,
+            )
+            request.styles.width = response.styles.width = None
+
+    def watch_sidebar_width(self, width: int) -> None:
+        browser = self.collection_browser
+        browser.styles.width = width
+        # The stylesheet caps the browser at a third of the screen; a width the
+        # user picked replaces that cap.
+        browser.styles.max_width = "100%"
+
+    def watch_split_percent(self) -> None:
+        self._apply_split()
+
+    def watch_resize_mode(self, active: bool) -> None:
+        self._highlight_resize_target(self.resize_target if active else None)
+        # A focused input would consume h/j/k/l as text, so focus is parked
+        # while resize mode is active and given back afterwards.
+        if active:
+            self._focus_before_resize = self.focused
+            self.set_focus(None)
+        else:
+            previous, self._focus_before_resize = self._focus_before_resize, None
+            if previous is not None and previous.is_attached and previous.focusable:
+                self.set_focus(previous)
+
+    def watch_resize_target(self, target: ResizeTarget) -> None:
+        if self.resize_mode:
+            self._highlight_resize_target(target)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {
+            "resize_step",
+            "resize_switch_target",
+            "resize_reset",
+            "exit_resize_mode",
+        }:
+            return self.resize_mode
+        if action == "toggle_resize_mode":
+            return not self.resize_mode
+        return super().check_action(action, parameters)
+
+    def action_toggle_resize_mode(self) -> None:
+        targets = self._resize_targets()
+        if not targets:
+            self.notify("Nothing to resize.", severity="warning", timeout=2)
+            return
+        if self.resize_target not in targets:
+            self.resize_target = targets[0]
+        self.resize_mode = True
+
+    def action_exit_resize_mode(self) -> None:
+        self.resize_mode = False
+
+    def on_descendant_focus(self) -> None:
+        # Focusing something, e.g. by clicking it, ends resize mode and keeps
+        # the new focus.
+        if self.resize_mode:
+            self._focus_before_resize = None
+            self.resize_mode = False
+
+    def action_resize_switch_target(self) -> None:
+        targets = self._resize_targets()
+        if not targets:
+            self.resize_mode = False
+            return
+        if self.resize_target in targets:
+            index = targets.index(self.resize_target)
+            self.resize_target = targets[(index + 1) % len(targets)]
+        else:
+            self.resize_target = targets[0]
+
+    def action_resize_step(self, steps: int) -> None:
+        """Move the selected divider by `steps`; negative moves it left or up."""
+        if self.resize_target not in self._resize_targets():
+            self.action_resize_switch_target()
+            if not self.resize_mode:
+                return
+        if self.resize_target == "sidebar":
+            browser = self.collection_browser
+            direction = -1 if browser.styles.dock == "right" else 1
+            self.sidebar_width = clamp_sidebar_width(
+                browser.outer_size.width + 2 * steps * direction,
+                self.app_body.size.width,
+            )
+        else:
+            self.split_percent = clamp_split(self.split_percent + 2 * steps)
+
+    def action_resize_reset(self) -> None:
+        if self.resize_target == "sidebar":
+            browser = self.collection_browser
+            width = self.settings.collection_browser.width
+            if width == 32:
+                # Back to the stylesheet's width and its cap.
+                browser.styles.width = None
+                browser.styles.max_width = None
+                self.set_reactive(MainScreen.sidebar_width, width)
+            else:
+                self.sidebar_width = width
+        else:
+            self.split_percent = SPLIT_DEFAULT
+
+    def _resize_target_at(self, x: int, y: int) -> ResizeTarget | None:
+        """The divider whose border is under the pointer, if any."""
+        browser = self.collection_browser
+        if (
+            browser.display
+            and _has_visible_border(browser)
+            and on_sidebar_edge(x, y, browser.region, str(browser.styles.dock))
+        ):
+            return "sidebar"
+        request, response = self.request_editor, self.response_area
+        if (
+            self.expanded_section is None
+            and _has_visible_border(request)
+            and on_split_edge(
+                x,
+                y,
+                request.region,
+                response.region,
+                self.current_layout == "horizontal",
+            )
+        ):
+            return "split"
+        return None
+
+    def on_mouse_down(self, event: MouseDown) -> None:
+        if event.button != 1:
+            return
+        target = self._resize_target_at(event.screen_x, event.screen_y)
+        if target is None:
+            return
+        event.stop()
+        event.prevent_default()
+        self._dragging = target
+        self._highlight_resize_target(target)
+        self.capture_mouse()
+
+    def on_mouse_move(self, event: MouseMove) -> None:
+        if self._dragging is None:
+            if not self.resize_mode:
+                self._highlight_resize_target(
+                    self._resize_target_at(event.screen_x, event.screen_y)
+                )
+            return
+        event.stop()
+        if self._dragging == "sidebar":
+            browser = self.collection_browser
+            self.sidebar_width = clamp_sidebar_width(
+                sidebar_width_at(
+                    event.screen_x, browser.region, str(browser.styles.dock)
+                ),
+                self.app_body.size.width,
+            )
+        else:
+            horizontal = self.current_layout == "horizontal"
+            self.split_percent = clamp_split(
+                split_at(
+                    event.screen_x if horizontal else event.screen_y,
+                    self.request_editor.region,
+                    self.response_area.region,
+                    horizontal,
+                )
+            )
+
+    def on_mouse_up(self, event: MouseUp) -> None:
+        if self._dragging is None:
+            return
+        event.stop()
+        self._dragging = None
+        self.release_mouse()
+        self._highlight_resize_target(self.resize_target if self.resize_mode else None)
 
     @on(RequestBodyTextArea.Changed, selector="RequestBodyTextArea")
     def on_request_body_change(self, event: RequestBodyTextArea.Changed) -> None:

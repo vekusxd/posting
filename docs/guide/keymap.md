@@ -80,3 +80,9 @@ These are the IDs of the actions that you can change the keybinding for:
 - `open-in-pager` - Open the content of the focused text area in your $PAGER/$POSTING_PAGER/$POSTING_PAGER_JSON. Default: `f3`.
 - `open-in-editor` - Open the content of the focused text area in your $EDITOR/$POSTING_EDITOR. Default: `f4`.
 - `search-requests` - Go to a request by name. Default: `ctrl+shift+p`.
+- `resize-mode` - Enter resize mode to move the panel dividers. Default: `ctrl+r`.
+- `resize-mode.back` / `resize-mode.forward` - In resize mode, move the selected divider left (up) or right (down). Default: `h,left,k,up` / `l,right,j,down`.
+- `resize-mode.back-more` / `resize-mode.forward-more` - The same, in bigger steps. Default: `H,K` / `L,J`.
+- `resize-mode.switch` - In resize mode, switch between the collection browser edge and the request/response split. Default: `tab,shift+tab`.
+- `resize-mode.reset` - In resize mode, restore the selected divider. Default: `equals_sign`.
+- `resize-mode.exit` - Leave resize mode. Default: `escape,enter,ctrl+r`.

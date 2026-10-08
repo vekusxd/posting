@@ -112,6 +112,10 @@ class CollectionBrowserSettings(BaseModel):
     show_on_startup: bool = Field(default=True)
     """If enabled, the collection browser will be shown on startup."""
 
+    width: int = Field(default=32, ge=16)
+    """The initial width of the collection browser, in cells. It can be changed
+    at runtime with resize mode or by dragging its edge."""
+
 
 class HistorySettings(BaseModel):
     enabled: bool = Field(default=True)

@@ -252,6 +252,11 @@ HelpPanel {
     border-title-style: b;
   }
 
+  /* The section whose edge resize mode, a drag or a hover is acting on. */
+  &.-resize-target {
+    border: double $accent 100%;
+  }
+
 }
 
 .hidden {

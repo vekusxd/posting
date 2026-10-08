@@ -31,6 +31,22 @@ Scrollbars can also be clicked and dragged.
 
 If you hold shift and scroll using the trackpad or mousewheel, the content will scroll horizontally (if there's a horizontal scrollbar).
 
+## Resizing panels
+
+Two dividers can be moved: the edge of the collection browser, and the border between the request editor and the response area.
+
+**With the mouse**, drag either border. The border highlights when the pointer is over it.
+Dragging needs visible borders, so it is not available with compact spacing.
+
+**With the keyboard**, press <kbd>ctrl</kbd>+<kbd>r</kbd> to enter resize mode. The selected divider is highlighted and the footer lists the keys:
+
+- <kbd>h</kbd>/<kbd>l</kbd> (or <kbd>k</kbd>/<kbd>j</kbd>, or the arrow keys) move it by two cells or two percent, <kbd>H</kbd>/<kbd>L</kbd> move it five times as far.
+- <kbd>tab</kbd> switches between the collection browser edge and the request/response split.
+- <kbd>=</kbd> restores the selected divider.
+- <kbd>escape</kbd>, <kbd>enter</kbd> or <kbd>ctrl</kbd>+<kbd>r</kbd> leave resize mode and give focus back.
+
+Sizes last until Posting exits. The starting width of the collection browser can be set with `collection_browser.width`.
+
 ## Searching and jumping to requests
 
 Press <kbd>ctrl</kbd>+<kbd>shift</kbd>+<kbd>p</kbd> to open the fuzzy search popup (configurable using the `search-requests` keybinding, see [keymap](./keymap.md)).
