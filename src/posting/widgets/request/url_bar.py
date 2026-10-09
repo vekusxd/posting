@@ -166,6 +166,8 @@ class UrlBar(Vertical):
     response_reason_phrase: Reactive[str | None] = reactive(
         None, init=False, always_update=True
     )
+    sending: Reactive[bool] = reactive(False, init=False)
+    """Whether the request on screen is waiting for its response."""
 
     def __init__(
         self,
@@ -197,6 +199,11 @@ class UrlBar(Vertical):
 
         status_code_label.update(str(status_code))
         status_code_label.display = True
+
+    def watch_sending(self, sending: bool) -> None:
+        button = self.query_one(SendRequestButton)
+        button.label = "Cancel" if sending else "Send"
+        button.set_class(sending, "-cancel")
 
     def watch_response_reason_phrase(self, reason_phrase: str | None) -> None:
         if reason_phrase is None:

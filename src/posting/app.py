@@ -31,6 +31,7 @@ from textual.markup import escape
 from textual.signal import Signal
 from textual.theme import Theme, BUILTIN_THEMES as TEXTUAL_THEMES
 from textual.widget import AwaitMount, Widget
+from textual.worker import Worker
 from textual.widgets.input import Selection
 from textual.widgets import Button, Footer, Input, Label, Tab, Tabs
 from textual.widgets.tabbed_content import ContentTab
@@ -105,7 +106,7 @@ from posting.urls import (
 from urllib.parse import urlparse, urlunparse
 from posting.widgets.response.response_area import ResponseArea
 from posting.widgets.response.response_trace import Event, ResponseTrace
-from posting.widgets.response.script_output import ScriptOutput
+from posting.widgets.response.script_output import ScriptOutput, ScriptStatus
 from posting.widgets.rich_log import RichLogIO
 from posting.xresources import load_xresources_themes
 
@@ -304,6 +305,10 @@ class MainScreen(Screen[None]):
         self.cookies: httpx.Cookies = httpx.Cookies()
         self._initial_layout: PostingLayout = layout
         self.environment_files = environment_files
+        # Requests are keyed by their file path; unsaved ones share the `None` key.
+        self._requests_in_flight: dict[Path | None, Worker[None]] = {}
+        # Responses that arrived while another request was open, shown on return.
+        self._unseen_responses: dict[Path | None, HttpResponseReceived] = {}
         self.settings = SETTINGS.get()
         self.jumper: Jumper | None = None
         self.posting = cast("Posting", self.app)
@@ -465,6 +470,7 @@ class MainScreen(Screen[None]):
         try:
             self.url_bar.clear_events()
             script_output = self.response_script_output
+            request_key = self._open_request_key()
         except NoMatches:
             # The UI is lazily loaded, so the widgets are not guaranteed to be available.
             # If you load the UI then immediately press enter, this method would be called
@@ -560,7 +566,7 @@ class MainScreen(Screen[None]):
                         self.response_script_output.set_request_status("success")
                 else:
                     self.response_script_output.set_request_status("no-script")
-                request = self.build_httpx_request(request_model, client)
+                request = self.build_httpx_request(request_model, client, request_key)
 
                 # Prioritise user-defined `User-Agent` header over Posting's default.
                 if "User-Agent" not in request.headers or request.headers.get(
@@ -574,9 +580,24 @@ class MainScreen(Screen[None]):
                     follow_redirects=request_options.follow_redirects,
                 )
 
-                self.post_message(HttpResponseReceived(response, history_request))
+                # The user may have opened another request while this one ran;
+                # its response must not overwrite the request now on screen.
+                is_open = self._open_request_key() == request_key
+                received = HttpResponseReceived(response, history_request)
+                if is_open:
+                    self.post_message(received)
+                else:
+                    self._unseen_responses[request_key] = received
+                    self._record_history(received)
+                    self.notify(
+                        f"{history_request.name or history_request.url}: "
+                        f"{response.status_code} {response.reason_phrase}. "
+                        "Open the request to see the response.",
+                        title="Response received",
+                    )
 
                 script_context.response = response
+                response_status: ScriptStatus
                 if on_response := request_model.scripts.on_response:
                     try:
                         self.get_and_run_script(
@@ -588,12 +609,14 @@ class MainScreen(Screen[None]):
                             script_context,
                         )
                     except Exception:
-                        self.response_script_output.set_response_status("error")
+                        response_status = "error"
                         # TODO - load the error into the response area, or log it.
                     else:
-                        self.response_script_output.set_response_status("success")
+                        response_status = "success"
                 else:
-                    self.response_script_output.set_response_status("no-script")
+                    response_status = "no-script"
+                if is_open:
+                    self.response_script_output.set_response_status(response_status)
 
         except httpx.ConnectTimeout as connect_timeout:
             log.error("Connect timeout", connect_timeout)
@@ -619,24 +642,85 @@ class MainScreen(Screen[None]):
         except Exception as e:
             log.error("Error sending request", e)
             log.error("Type of error", type(e))
-            self.url_input.add_class("error")
+            if self._open_request_key() == request_key:
+                self.url_input.add_class("error")
             self.notify(
                 severity="error",
                 title="Couldn't send request",
                 message=str(e),
             )
         else:
-            self.url_input.remove_class("error")
+            if self._open_request_key() == request_key:
+                self.url_input.remove_class("error")
 
-    @work(exclusive=True)
-    async def send_via_worker(self) -> None:
-        await self.send_request()
+    def send_via_worker(self) -> None:
+        """Send the open request unless it is still waiting for a response.
+
+        Each request runs in its own worker, so sending another request does
+        not cancel one in progress.
+        """
+        try:
+            request_key = self._open_request_key()
+        except NoMatches:
+            return
+        if request_key in self._requests_in_flight:
+            self.notify(
+                "Wait for its response or press Cancel.",
+                title="Request in progress",
+                severity="warning",
+            )
+            return
+        self._unseen_responses.pop(request_key, None)
+        self._requests_in_flight[request_key] = self.run_worker(
+            self._send_tracked(request_key), group="send-request"
+        )
+        self._sync_send_button()
+
+    async def _send_tracked(self, request_key: Path | None) -> None:
+        try:
+            await self.send_request()
+        finally:
+            self._requests_in_flight.pop(request_key, None)
+            self._sync_send_button()
+
+    def cancel_open_request(self) -> None:
+        """Stop waiting for the open request's response."""
+        worker = self._requests_in_flight.get(self._open_request_key())
+        if worker is None:
+            return
+        worker.cancel()
+        self.notify(
+            "The server may still finish processing it.",
+            title="Request cancelled",
+        )
+
+    def _open_request_key(self) -> Path | None:
+        """Identify the open request by its file path; unsaved requests share `None`."""
+        open_node = self.collection_tree.currently_open
+        if open_node is not None and isinstance(open_node.data, RequestModel):
+            return open_node.data.path
+        return None
+
+    def _sync_send_button(self) -> None:
+        """Turn Send into Cancel while the open request waits for its response."""
+        try:
+            open_key = self._open_request_key()
+            self.url_bar.sending = open_key in self._requests_in_flight
+        except NoMatches:
+            pass
 
     @on(MethodSelector.MethodChanged)
     def on_method_selector_changed(self, event: MethodSelector.MethodChanged) -> None:
         self.selected_method = event.value
 
     @on(Button.Pressed, selector="SendRequestButton")
+    def handle_send_button(self) -> None:
+        """Send the request, or cancel it while it is in progress."""
+        if self.url_bar.sending:
+            self.cancel_open_request()
+        else:
+            self.send_via_worker()
+
     @on(Input.Submitted, selector="UrlInput")
     def handle_submit_via_event(self) -> None:
         """Send the request."""
@@ -645,7 +729,10 @@ class MainScreen(Screen[None]):
     @on(HttpResponseReceived)
     def on_response_received(self, event: HttpResponseReceived) -> None:
         """Update the response area with the response."""
+        self._show_response(event)
+        self._record_history(event)
 
+    def _show_response(self, event: HttpResponseReceived) -> None:
         # If the config to automatically move the focus on receipt
         # of a response has been set, move focus as required.
         focus_on_response = self.settings.focus.on_response
@@ -658,9 +745,11 @@ class MainScreen(Screen[None]):
         self.response_area.response = event.response
         self.url_bar.response_status_code = event.response.status_code
         self.url_bar.response_reason_phrase = event.response.reason_phrase
-        self.cookies.update(event.response.cookies)
         self.response_trace.trace_complete()
 
+    def _record_history(self, event: HttpResponseReceived) -> None:
+        """Keep cookies and history for every response, shown or not."""
+        self.cookies.update(event.response.cookies)
         if self.settings.history.enabled:
             try:
                 saved = self.history_store.record(event.response, event.request)
@@ -682,6 +771,7 @@ class MainScreen(Screen[None]):
         if event.request is not None:
             self.collection_tree.currently_open = None
             self.load_request_model(event.request)
+            self._sync_send_button()
             if (
                 event.request.body is not None
                 and event.request.body.content is not None
@@ -706,6 +796,10 @@ class MainScreen(Screen[None]):
     def on_request_selected(self, event: CollectionTree.RequestSelected) -> None:
         """Load a request model into the UI when a request is selected."""
         self.load_request_model(event.request)
+        self._sync_send_button()
+        if unseen := self._unseen_responses.pop(self._open_request_key(), None):
+            self.url_bar.clear_events()
+            self._show_response(unseen)
         if focus_on_request_open := self.settings.focus.on_request_open:
             targets = {
                 "headers": self.headers_table,
@@ -1215,10 +1309,17 @@ class MainScreen(Screen[None]):
         self,
         request_model: RequestModel,
         client: httpx.AsyncClient,
+        request_key: Path | None = None,
     ) -> httpx.Request:
         """Build an httpx request from the UI."""
         request = request_model.to_httpx(client)
-        request.extensions = {"trace": self.log_request_trace_event}
+
+        async def trace(event: Event, info: dict[str, Any]) -> None:
+            # Trace markers belong to the request on screen; skip the others.
+            if self._open_request_key() == request_key:
+                await self.log_request_trace_event(event, info)
+
+        request.extensions = {"trace": trace}
 
         return request
 

@@ -479,6 +479,10 @@ SendRequestButton {
   &:hover {
     background-tint: $text-accent 10%;
   }
+  &.-cancel {
+    background: $error-muted;
+    color: $text-error;
+  }
 }
 
 KeyValueEditor {
