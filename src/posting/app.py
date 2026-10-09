@@ -207,6 +207,14 @@ class MainScreen(Screen[None]):
             id="search-requests",
         ),
         Binding(
+            "ctrl+K,ctrl+shift+k",
+            "clear_response",
+            "Clear response",
+            show=False,
+            tooltip="Clear the response shown for the open request.",
+            id="clear-response",
+        ),
+        Binding(
             "ctrl+r",
             "toggle_resize_mode",
             "Resize",
@@ -307,8 +315,8 @@ class MainScreen(Screen[None]):
         self.environment_files = environment_files
         # Requests are keyed by their file path; unsaved ones share the `None` key.
         self._requests_in_flight: dict[Path | None, Worker[None]] = {}
-        # Responses that arrived while another request was open, shown on return.
-        self._unseen_responses: dict[Path | None, HttpResponseReceived] = {}
+        # The last response of each request, shown again when it is reopened.
+        self._last_responses: dict[Path | None, HttpResponseReceived] = {}
         self.settings = SETTINGS.get()
         self.jumper: Jumper | None = None
         self.posting = cast("Posting", self.app)
@@ -584,10 +592,10 @@ class MainScreen(Screen[None]):
                 # its response must not overwrite the request now on screen.
                 is_open = self._open_request_key() == request_key
                 received = HttpResponseReceived(response, history_request)
+                self._last_responses[request_key] = received
                 if is_open:
                     self.post_message(received)
                 else:
-                    self._unseen_responses[request_key] = received
                     self._record_history(received)
                     self.notify(
                         f"{history_request.name or history_request.url}: "
@@ -670,7 +678,9 @@ class MainScreen(Screen[None]):
                 severity="warning",
             )
             return
-        self._unseen_responses.pop(request_key, None)
+        # A stale response on screen would read as the result of this send.
+        self._last_responses.pop(request_key, None)
+        self._clear_response()
         self._requests_in_flight[request_key] = self.run_worker(
             self._send_tracked(request_key), group="send-request"
         )
@@ -693,6 +703,17 @@ class MainScreen(Screen[None]):
             "The server may still finish processing it.",
             title="Request cancelled",
         )
+
+    def action_clear_response(self) -> None:
+        """Clear the response shown for the open request."""
+        self._last_responses.pop(self._open_request_key(), None)
+        self._clear_response()
+
+    def _clear_response(self) -> None:
+        self.response_area.history_timestamp = None
+        self.response_area.response = None
+        self.url_bar.response_status_code = None
+        self.url_bar.clear_events()
 
     def _open_request_key(self) -> Path | None:
         """Identify the open request by its file path; unsaved requests share `None`."""
@@ -732,7 +753,6 @@ class MainScreen(Screen[None]):
         self._show_response(event)
         self._record_history(event)
 
-    def _show_response(self, event: HttpResponseReceived) -> None:
         # If the config to automatically move the focus on receipt
         # of a response has been set, move focus as required.
         focus_on_response = self.settings.focus.on_response
@@ -741,6 +761,7 @@ class MainScreen(Screen[None]):
         elif focus_on_response == "tabs":
             self.response_area.content_tabs.focus()
 
+    def _show_response(self, event: HttpResponseReceived) -> None:
         self.response_area.history_timestamp = None
         self.response_area.response = event.response
         self.url_bar.response_status_code = event.response.status_code
@@ -797,9 +818,13 @@ class MainScreen(Screen[None]):
         """Load a request model into the UI when a request is selected."""
         self.load_request_model(event.request)
         self._sync_send_button()
-        if unseen := self._unseen_responses.pop(self._open_request_key(), None):
+        # Show this request's own last response, never the previous request's.
+        last_response = self._last_responses.get(self._open_request_key())
+        if last_response is None:
+            self._clear_response()
+        else:
             self.url_bar.clear_events()
-            self._show_response(unseen)
+            self._show_response(last_response)
         if focus_on_request_open := self.settings.focus.on_request_open:
             targets = {
                 "headers": self.headers_table,

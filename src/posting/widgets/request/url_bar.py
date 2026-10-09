@@ -185,10 +185,13 @@ class UrlBar(Vertical):
         self.url_input.refresh()
 
     def watch_response_status_code(self, status_code: int | None) -> None:
+        status_code_label = self.status_code_label
         if status_code is None:
+            status_code_label.update("")
+            status_code_label.tooltip = None
+            status_code_label.display = False
             return
 
-        status_code_label = self.status_code_label
         status_code_label.remove_class("-success", "-warning", "-error")
         if status_code < 300:
             status_code_label.add_class("-success")

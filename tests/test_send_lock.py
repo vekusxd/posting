@@ -165,3 +165,81 @@ async def _other_requests_stay_sendable(collection, transport):
         await open_request(pilot, 0)
         assert url_bar.response_status_code == 201
         assert button_label(pilot) == "Send"
+
+
+def shown_body(pilot) -> str:
+    return pilot.app.screen.response_area.text_editor.text_area.text
+
+
+@use_config("general.yaml")
+def test_sending_clears_the_previous_response(collection, transport):
+    asyncio.run(_sending_clears_the_previous_response(collection, transport))
+
+
+async def _sending_clears_the_previous_response(collection, transport):
+    app = make_posting(collection=collection)
+    async with app.run_test(size=SIZE) as pilot:
+        await open_request(pilot, 0)
+        await press_send_button(pilot)
+        transport.release("https://example.test/a")
+        await settle(pilot)
+        url_bar = app.screen.query_one(UrlBar)
+        assert url_bar.response_status_code == 201
+        assert "example.test/a" in shown_body(pilot)
+
+        transport.gates.clear()
+        await press_send_button(pilot)
+        assert button_label(pilot) == "Cancel"
+        assert url_bar.response_status_code is None
+        assert shown_body(pilot) == ""
+
+        transport.release("https://example.test/a")
+        await settle(pilot)
+
+
+@use_config("general.yaml")
+def test_each_request_shows_its_own_response(collection, transport):
+    asyncio.run(_each_request_shows_its_own_response(collection, transport))
+
+
+async def _each_request_shows_its_own_response(collection, transport):
+    app = make_posting(collection=collection)
+    async with app.run_test(size=SIZE) as pilot:
+        await open_request(pilot, 0)
+        await press_send_button(pilot)
+        transport.release("https://example.test/a")
+        await settle(pilot)
+
+        await open_request(pilot, 1)
+        url_bar = app.screen.query_one(UrlBar)
+        assert url_bar.response_status_code is None
+        assert shown_body(pilot) == ""
+
+        await open_request(pilot, 0)
+        assert url_bar.response_status_code == 201
+        assert "example.test/a" in shown_body(pilot)
+
+
+@use_config("general.yaml")
+def test_shortcut_clears_the_response(collection, transport):
+    asyncio.run(_shortcut_clears_the_response(collection, transport))
+
+
+async def _shortcut_clears_the_response(collection, transport):
+    app = make_posting(collection=collection)
+    async with app.run_test(size=SIZE) as pilot:
+        await open_request(pilot, 0)
+        await press_send_button(pilot)
+        transport.release("https://example.test/a")
+        await settle(pilot)
+
+        await pilot.press("ctrl+shift+k")
+        await pilot.pause()
+        url_bar = app.screen.query_one(UrlBar)
+        assert url_bar.response_status_code is None
+        assert shown_body(pilot) == ""
+
+        # The cleared response stays cleared when the request is reopened.
+        await open_request(pilot, 1)
+        await open_request(pilot, 0)
+        assert url_bar.response_status_code is None

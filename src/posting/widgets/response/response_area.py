@@ -80,6 +80,7 @@ class ResponseArea(Vertical):
     def watch_response(self, response: httpx.Response | None) -> None:
         self._latest_response = response
         if response is None:
+            self._show_empty()
             return
         else:
             self.query_one(ResponseTabbedContent).disabled = False
@@ -149,6 +150,23 @@ class ResponseArea(Vertical):
         settings = SETTINGS.get()
         if settings.response.show_size_and_time:
             self.border_subtitle = f"{human_readable_size(len(response.content))} in {response.elapsed.total_seconds() * 1000:.2f}[dim]ms[/]"
+
+    def _show_empty(self) -> None:
+        """Return to the state before any response arrived."""
+        self.remove_class("response-ready", "success", "warning", "error")
+        self.border_title = "Response"
+        self.border_subtitle = ""
+        # Lazily mounted panes may not exist yet, hence the queries.
+        for history_info in self.query("#response-history-info"):
+            history_info.display = False
+        for text_area in self.query(ResponseTextArea):
+            text_area.text = ""
+        for table in self.query(ResponseHeadersTable):
+            table.clear()
+        for section in self.query(CookiesSection):
+            section.table.clear()
+        for tabbed_content in self.query(ResponseTabbedContent):
+            tabbed_content.disabled = True
 
     def _make_border_title(self, response: httpx.Response) -> str:
         style = self.get_component_rich_style("border-title-status")
